@@ -1,0 +1,221 @@
+"""
+NER Pipeline v3 — Core extraction logic.
+GLiNER zero-shot extraction + 3-stage post-processing.
+"""
+
+import re
+from gliner import GLiNER
+
+from ner_pipeline_v3.config import (
+    GLINER_MODEL,
+    LABELS,
+    DESCRIPTION_TO_LABEL,
+    PRIMARY_THRESHOLD,
+    FALLBACK_THRESHOLD,
+    MAX_SPAN_WORDS,
+    MIN_ENTITIES,
+    MUST_HAVE_CC,
+)
+
+# Leading filler phrases to strip from entity spans (order matters: longer first)
+_FILLER_PREFIXES = [
+    "i've also been having ",
+    "i've also been ",
+    "i've been having ",
+    "i've been ",
+    "i'm having ",
+    "i also have ",
+    "i have ",
+    "patient reports ",
+    "patient denies ",
+    "patient has ",
+    "the ",
+    "my ",
+]
+
+# Compiled pattern: anchored at start, case-insensitive
+_FILLER_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(p) for p in _FILLER_PREFIXES) + r")",
+    re.IGNORECASE,
+)
+
+
+class ClinicalExtractorV3:
+    """
+    Zero-shot clinical NER using GLiNER with SOAP-aligned labels and
+    three post-processing stages: confidence filtering, span cleaning,
+    and deduplication.
+    """
+
+    def __init__(self, model_name: str = GLINER_MODEL) -> None:
+        """Load GLiNER model once; reused across all extract() calls."""
+        self.model = GLiNER.from_pretrained(model_name)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Public API
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def extract(self, dialogue_text: str) -> list[dict]:
+        """
+        Full extraction pipeline for one dialogue.
+
+        Returns:
+            List of dicts with keys: text, label, score
+            e.g. [{"text": "weight loss", "label": "chief complaint", "score": 0.89}]
+        """
+        if not dialogue_text or not dialogue_text.strip():
+            return []
+
+        entities = self._run_gliner(dialogue_text, PRIMARY_THRESHOLD)
+        entities = self._filter_confidence(entities, dialogue_text)
+        entities = self._clean_spans(entities)
+        entities = self._deduplicate(entities)
+        return entities
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Stage 0: GLiNER extraction
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _run_gliner(self, text: str, threshold: float) -> list[dict]:
+        """
+        Run GLiNER with sentence-level chunking to avoid truncation.
+        Splits on dialogue turns ([doctor]: / [patient]:) which are
+        natural boundaries and guaranteed to be short enough.
+        """
+        import re
+
+        # Split on dialogue turns
+        turns = re.split(r'(?=\[(?:doctor|patient)\]:)', text, flags=re.IGNORECASE)
+        turns = [t.strip() for t in turns if t.strip()]
+
+        # Group turns into chunks of ~3-4 turns (keeps context, stays under 300 tokens)
+        TURNS_PER_CHUNK = 3
+        all_entities = []
+
+        for i in range(0, len(turns), TURNS_PER_CHUNK):
+            chunk = " ".join(turns[i:i + TURNS_PER_CHUNK])
+            if not chunk.strip():
+                continue
+
+            raw = self.model.predict_entities(chunk, LABELS, threshold=threshold)
+            for ent in raw:
+                all_entities.append(
+                    {
+                        "text": ent["text"],
+                        "label": DESCRIPTION_TO_LABEL.get(ent["label"], ent["label"]),
+                        "score": float(ent["score"]),
+                    }
+                )
+
+        return all_entities
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Stage 1: Confidence filtering + adaptive fallback + CC promotion
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _filter_confidence(self, entities: list[dict], text: str) -> list[dict]:
+        """
+        Keep entities at PRIMARY_THRESHOLD. If fewer than MIN_ENTITIES remain,
+        re-run at FALLBACK_THRESHOLD. Then ensure at least one chief complaint.
+        """
+        filtered = [e for e in entities if e["score"] >= PRIMARY_THRESHOLD]
+
+        if len(filtered) < MIN_ENTITIES:
+            filtered = self._run_gliner(text, FALLBACK_THRESHOLD)
+            filtered = [e for e in filtered if e["score"] >= FALLBACK_THRESHOLD]
+
+        if MUST_HAVE_CC:
+            has_cc = any(e["label"] == "chief complaint" for e in filtered)
+            if not has_cc:
+                symptoms = [e for e in filtered if e["label"] == "symptom"]
+                if symptoms:
+                    best_symptom = max(symptoms, key=lambda e: e["score"])
+                    best_symptom = dict(best_symptom)  # don't mutate original
+                    best_symptom["label"] = "chief complaint"
+                    promoted_text = best_symptom["text"]
+                    new_filtered = []
+                    promoted = False
+                    for e in filtered:
+                        if not promoted and e["label"] == "symptom" and e["text"] == promoted_text:
+                            new_filtered.append(best_symptom)
+                            promoted = True
+                        else:
+                            new_filtered.append(e)
+                    if not promoted:
+                        new_filtered.append(best_symptom)
+                    filtered = new_filtered
+
+        return filtered
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Stage 2: Span cleaning
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _clean_spans(self, entities: list[dict]) -> list[dict]:
+        """
+        Reject spans that are too long, strip leading filler phrases,
+        then re-check length, and drop trivial/empty spans.
+        """
+        cleaned = []
+        for ent in entities:
+            text = ent["text"].strip()
+            text = text.replace('\u2019', "'").replace('\u2018', "'")
+
+            # Initial length gate
+            if len(text.split()) > MAX_SPAN_WORDS:
+                continue
+
+            # Strip filler prefix (may need multiple passes for nested fillers)
+            prev = None
+            while prev != text:
+                prev = text
+                text = _FILLER_RE.sub("", text).strip()
+
+            # Post-strip checks
+            if not text:
+                continue
+            if len(text) <= 1:
+                continue
+            if len(text.split()) > MAX_SPAN_WORDS:
+                continue
+
+            cleaned.append({**ent, "text": text})
+
+        return cleaned
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Stage 3: Deduplication
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _deduplicate(self, entities: list[dict]) -> list[dict]:
+        """
+        1. Exact-match dedup (case-insensitive): keep higher-scoring entity.
+        2. Substring dedup within same label: remove shorter span if it is a
+           substring of a longer span with the same label.
+        """
+        # --- Exact dedup ---
+        seen: dict[str, dict] = {}  # normalized_text -> entity dict
+        for ent in entities:
+            key = ent["text"].lower().strip()
+            if key not in seen or ent["score"] > seen[key]["score"]:
+                seen[key] = ent
+        unique = list(seen.values())
+
+        # --- Substring dedup (same label) ---
+        # Sort by text length descending so we always keep the longer span
+        unique.sort(key=lambda e: len(e["text"]), reverse=True)
+        keep: list[dict] = []
+        for candidate in unique:
+            cand_text = candidate["text"].lower()
+            cand_label = candidate["label"]
+            dominated = False
+            for kept in keep:
+                if kept["label"] == cand_label:
+                    kept_text = kept["text"].lower()
+                    if cand_text in kept_text:
+                        dominated = True
+                        break
+            if not dominated:
+                keep.append(candidate)
+
+        return keep

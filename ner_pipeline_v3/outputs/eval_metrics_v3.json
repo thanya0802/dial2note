@@ -1,0 +1,64 @@
+{
+  "entity_usefulness_score": {
+    "mean": 0.7200966784445832,
+    "median": 0.7333333333333333,
+    "std": 0.14910505290961076,
+    "target": "> 0.70"
+  },
+  "noise_ratio": {
+    "mean": 0.00013407544836116264,
+    "target": "< 0.10"
+  },
+  "clinical_coverage_score": {
+    "mean": 0.37721239068988216,
+    "rows_evaluated": 1502
+  },
+  "label_distribution": {
+    "diagnosis": 1881,
+    "symptom": 5525,
+    "chief complaint": 1262,
+    "test or lab order": 2386,
+    "vital sign": 3298,
+    "drug detail": 1572,
+    "referral": 1282,
+    "physical exam finding": 3450,
+    "follow-up instruction": 5339,
+    "medication": 2051
+  },
+  "span_length_stats": {
+    "mean": 2.38,
+    "median": 2.0,
+    "min": 1,
+    "max": 7,
+    "total_spans": 28046,
+    "bucket_counts": {
+      "1_word": 6090,
+      "2_words": 11287,
+      "3_4_words": 9310,
+      "5_7_words": 1359,
+      "7plus_words": 0
+    },
+    "bucket_pct": {
+      "1_word": 21.7,
+      "2_words": 40.2,
+      "3_4_words": 33.2,
+      "5_7_words": 4.8,
+      "7plus_words": 0.0
+    }
+  },
+  "confidence_distribution": {
+    "mean": 0.8847,
+    "median": 0.9,
+    "min": 0.0,
+    "max": 1.0,
+    "unique_score_count": 43,
+    "all_identical_flag": false,
+    "bucket_counts": {
+      "lt_0.3": 70,
+      "0.3_0.5": 2,
+      "0.5_0.7": 136,
+      "0.7_0.9": 6278,
+      "gt_0.9": 21560
+    }
+  }
+}
