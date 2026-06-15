@@ -49,7 +49,7 @@ Split used: 8,529 train / 1,506 eval / 368 test (test set provided separately by
 
 ```bash
 # Clone repository
-git clone https://github.com/thanya-northeastern/dial2note.git
+git clone https://github.com/thanya0802/dial2note.git
 cd dial2note
 
 # Create conda environment
